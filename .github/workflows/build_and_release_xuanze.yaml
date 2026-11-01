@@ -1,0 +1,518 @@
+name: Build and release Aseprite_xuanze
+
+# Manual trigger only (push / BuildLog.md trigger removed on purpose).
+# Every run explicitly picks the target systems, the Aseprite ref and the Skia archive.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish a GitHub Release (false = build only, upload artifacts)'
+        type: boolean
+        default: true
+      aseprite_ref:
+        description: 'Aseprite branch / tag / commit to build (empty = latest official release)'
+        type: string
+        default: ''
+      release_tag:
+        description: 'Release tag (empty = latest release tag, or the Aseprite ref)'
+        type: string
+        default: ''
+      build_windows:
+        description: 'Build Windows x64'
+        type: boolean
+        default: true
+      build_linux:
+        description: 'Build Linux x64'
+        type: boolean
+        default: true
+      build_macos_arm64:
+        description: 'Build macOS Apple Silicon (arm64)'
+        type: boolean
+        default: true
+      build_macos_x86:
+        description: 'Build macOS Intel (x86_64)'
+        type: boolean
+        default: false
+      skia_repo:
+        description: 'Skia release repository (owner/repo)'
+        type: string
+        default: 'aseprite/skia'
+      skia_version:
+        description: 'Skia release tag, must match the Aseprite ref (e.g. m124-08a5439a6b)'
+        type: string
+        default: 'm124-08a5439a6b'
+      skia_url_windows:
+        description: 'Custom Skia archive URL for Windows (empty = skia_repo/skia_version)'
+        type: string
+        default: ''
+      skia_url_linux:
+        description: 'Custom Skia archive URL for Linux (empty = skia_repo/skia_version)'
+        type: string
+        default: ''
+      skia_url_macos_arm64:
+        description: 'Custom Skia archive URL for macOS arm64 (empty = skia_repo/skia_version)'
+        type: string
+        default: ''
+      skia_url_macos_x86:
+        description: 'Custom Skia archive URL for macOS x86_64 (empty = skia_repo/skia_version)'
+        type: string
+        default: ''
+
+# Same single build type for all three systems.
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  prepare:
+    name: Prepare build plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      aseprite-ref: ${{ steps.plan.outputs.aseprite-ref }}
+      release-tag: ${{ steps.plan.outputs.release-tag }}
+    steps:
+      - name: Fetch latest Aseprite release tag
+        id: latest
+        if: ${{ inputs.aseprite_ref == '' }}
+        uses: a1393323447/fetch-release@main
+        with:
+          group: aseprite
+          repo: aseprite
+          match: Aseprite-.*?-Source.zip
+
+      - name: Resolve build plan
+        id: plan
+        env:
+          INPUT_REF: ${{ inputs.aseprite_ref }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+          LATEST_TAG: ${{ steps.latest.outputs.release-tag }}
+          PUBLISH: ${{ inputs.publish }}
+          BUILD_WINDOWS: ${{ inputs.build_windows }}
+          BUILD_LINUX: ${{ inputs.build_linux }}
+          BUILD_MACOS_ARM64: ${{ inputs.build_macos_arm64 }}
+          BUILD_MACOS_X86: ${{ inputs.build_macos_x86 }}
+          SKIA_REPO: ${{ inputs.skia_repo }}
+          SKIA_VERSION: ${{ inputs.skia_version }}
+          SKIA_URL_WINDOWS: ${{ inputs.skia_url_windows }}
+          SKIA_URL_LINUX: ${{ inputs.skia_url_linux }}
+          SKIA_URL_MACOS_ARM64: ${{ inputs.skia_url_macos_arm64 }}
+          SKIA_URL_MACOS_X86: ${{ inputs.skia_url_macos_x86 }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+
+          def env(name):
+              return (os.environ.get(name) or "").strip()
+
+
+          def flag(name):
+              return env(name).lower() == "true"
+
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          latest_tag = env("LATEST_TAG")
+          input_ref = env("INPUT_REF")
+          input_tag = env("INPUT_TAG")
+
+          aseprite_ref = input_ref or latest_tag
+          if not aseprite_ref:
+              fail("No Aseprite ref resolved: the release lookup returned nothing and aseprite_ref is empty.")
+
+          if (
+              not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", aseprite_ref)
+              or ".." in aseprite_ref
+              or aseprite_ref.endswith("/")
+              or aseprite_ref.endswith(".lock")
+          ):
+              fail(
+                  f"Invalid Aseprite ref '{aseprite_ref}'. "
+                  "Use a branch, tag or commit SHA made of [A-Za-z0-9._/-]."
+              )
+
+          if input_tag:
+              if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", input_tag) or ".." in input_tag:
+                  fail(f"Invalid release_tag '{input_tag}'. Only [A-Za-z0-9._-] are allowed.")
+              release_tag = input_tag
+          elif input_ref:
+              # A branch such as feature/foo cannot be used verbatim as an asset name.
+              release_tag = re.sub(r"[^A-Za-z0-9._-]+", "-", input_ref).strip("-.") or "custom-build"
+          else:
+              release_tag = aseprite_ref
+
+          skia_repo = env("SKIA_REPO") or "aseprite/skia"
+          if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", skia_repo):
+              fail(f"Invalid skia_repo '{skia_repo}'. Expected owner/repo.")
+
+          skia_version = env("SKIA_VERSION") or "m124-08a5439a6b"
+          if not re.fullmatch(r"[A-Za-z0-9._-]+", skia_version):
+              fail(f"Invalid skia_version '{skia_version}'.")
+
+          skia_base = f"https://github.com/{skia_repo}/releases/download/{skia_version}"
+
+
+          def skia_url(override_env, default_asset):
+              value = env(override_env)
+              if not value:
+                  return f"{skia_base}/{default_asset}"
+              if not re.fullmatch(r"https?://[^\s]+", value):
+                  fail(f"Invalid {override_env} '{value}': it must be an http(s) URL.")
+              return value
+
+
+          targets = []
+
+          if flag("BUILD_WINDOWS"):
+              targets.append(
+                  {
+                      "label": "Windows x64",
+                      "os": "windows-latest",
+                      "asset_os": "Windows",
+                      "skia_arch": "x64",
+                      "macos_arch": "",
+                      "skia_url": skia_url("SKIA_URL_WINDOWS", "Skia-Windows-Release-x64.zip"),
+                  }
+              )
+
+          if flag("BUILD_LINUX"):
+              targets.append(
+                  {
+                      "label": "Linux x64",
+                      "os": "ubuntu-latest",
+                      "asset_os": "Linux",
+                      "skia_arch": "x64",
+                      "macos_arch": "",
+                      "skia_url": skia_url("SKIA_URL_LINUX", "Skia-Linux-Release-x64.zip"),
+                  }
+              )
+
+          if flag("BUILD_MACOS_ARM64"):
+              targets.append(
+                  {
+                      "label": "macOS arm64",
+                      "os": "macos-latest",
+                      "asset_os": "macOS-arm64",
+                      "skia_arch": "arm64",
+                      "macos_arch": "arm64",
+                      "skia_url": skia_url("SKIA_URL_MACOS_ARM64", "Skia-macOS-Release-arm64.zip"),
+                  }
+              )
+
+          if flag("BUILD_MACOS_X86"):
+              targets.append(
+                  {
+                      "label": "macOS x86_64",
+                      "os": "macos-15-intel",
+                      "asset_os": "macOS-x64",
+                      "skia_arch": "x64",
+                      "macos_arch": "x86_64",
+                      "skia_url": skia_url("SKIA_URL_MACOS_X86", "Skia-macOS-Release-x64.zip"),
+                  }
+              )
+
+          if not targets:
+              fail("No build target selected: enable at least one of build_windows, build_linux, build_macos_arm64, build_macos_x86.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"matrix={json.dumps(targets, separators=(',', ':'))}\n")
+              handle.write(f"aseprite-ref={aseprite_ref}\n")
+              handle.write(f"release-tag={release_tag}\n")
+
+          print("Aseprite ref:", aseprite_ref)
+          print("Release tag:", release_tag)
+          print("Targets:", ", ".join(target["label"] for target in targets))
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("## Aseprite build plan\n\n")
+                  handle.write(f"- Aseprite ref: `{aseprite_ref}`\n")
+                  handle.write(f"- Release tag: `{release_tag}`\n")
+                  handle.write(f"- Publish release: `{flag('PUBLISH')}`\n")
+                  handle.write(f"- Skia source: `{skia_repo}` @ `{skia_version}`\n\n")
+                  handle.write("| Target | Runner | Skia archive |\n| --- | --- | --- |\n")
+                  for target in targets:
+                      handle.write(
+                          f"| {target['label']} | `{target['os']}` | {target['skia_url']} |\n"
+                      )
+          PY
+
+  create-release:
+    name: Create Release
+    needs: prepare
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: ncipollo/release-action@v1.21.0
+        with:
+          tag: ${{ needs.prepare.outputs.release-tag }}
+          body: |
+            Aseprite-${{ needs.prepare.outputs.release-tag }}
+            Built from `${{ needs.prepare.outputs.aseprite-ref }}`
+          skipIfReleaseExists: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-aseprite:
+    name: Build ${{ matrix.label }}
+    needs: [prepare, create-release]
+    if: >-
+      ${{ !cancelled() && needs.prepare.result == 'success' &&
+          (needs.create-release.result == 'success' ||
+           (!inputs.publish && needs.create-release.result == 'skipped')) }}
+    permissions:
+      contents: write
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - name: Install Dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
+            libfontconfig1-dev
+
+      - uses: actions/checkout@v7
+
+      - name: Install Aseprite (${{ needs.prepare.outputs.aseprite-ref }})
+        shell: bash
+        env:
+          ASEPRITE_REF: ${{ needs.prepare.outputs.aseprite-ref }}
+        run: |
+          set -euo pipefail
+          mkdir aseprite
+          cd aseprite
+          git init -q .
+          git remote add origin https://github.com/aseprite/aseprite.git
+
+          # Branches, tags and commit SHAs are all accepted here.
+          if git fetch --depth 1 origin "$ASEPRITE_REF"; then
+            git checkout -q --detach FETCH_HEAD
+          else
+            echo "Shallow fetch failed, fetching all refs and history..."
+            git fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+            if git rev-parse --verify -q "$ASEPRITE_REF^{commit}" >/dev/null; then
+              git checkout -q --detach "$ASEPRITE_REF"
+            elif git rev-parse --verify -q "origin/$ASEPRITE_REF^{commit}" >/dev/null; then
+              git checkout -q --detach "origin/$ASEPRITE_REF"
+            else
+              echo "::error::Cannot resolve Aseprite ref '$ASEPRITE_REF'."
+              exit 1
+            fi
+          fi
+
+          git submodule sync --recursive
+          git submodule update --init --recursive -j8
+
+      - name: Install Skia
+        shell: bash
+        env:
+          SKIA_URL: ${{ matrix.skia_url }}
+          SKIA_ARCH: ${{ matrix.skia_arch }}
+        run: |
+          set -euo pipefail
+
+          # A mismatched runner would silently cross-compile against the wrong Skia.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            actual_arch=$(uname -m)
+            if [[ "$actual_arch" == "arm64" && "$SKIA_ARCH" != "arm64" ]] ||
+               [[ "$actual_arch" == "x86_64" && "$SKIA_ARCH" != "x64" ]]; then
+              echo "::error::Runner architecture '$actual_arch' does not match the selected Skia target '$SKIA_ARCH'."
+              echo "::error::Pick the matching macOS target (build_macos_arm64 or build_macos_x86)."
+              exit 1
+            fi
+          fi
+
+          download_dir="$GITHUB_WORKSPACE/.skia-download"
+          extract_dir="$GITHUB_WORKSPACE/.skia-extract"
+          archive="$download_dir/skia-archive"
+
+          rm -rf "$download_dir" "$extract_dir"
+          mkdir -p "$download_dir" "$extract_dir"
+
+          echo "Downloading Skia: $SKIA_URL"
+          curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$archive" "$SKIA_URL"
+
+          # Users may supply their own Skia build, so accept every common archive
+          # type instead of trusting the URL (release assets often have none).
+          extract_skia() {
+            if command -v unzip >/dev/null 2>&1 && unzip -tq "$archive" >/dev/null 2>&1; then
+              unzip -q -o "$archive" -d "$extract_dir"
+            elif tar -tf "$archive" >/dev/null 2>&1; then
+              tar -xf "$archive" -C "$extract_dir"
+            elif command -v 7z >/dev/null 2>&1 && 7z l "$archive" >/dev/null 2>&1; then
+              7z x -y -o"$extract_dir" "$archive" >/dev/null
+            else
+              echo "::error::Cannot extract the Skia archive from $SKIA_URL."
+              echo "::error::Supported formats: .zip, .tar.gz, .tar.xz, .tar.bz2, .tar.zst, .7z."
+              exit 1
+            fi
+          }
+          extract_skia
+
+          header=$(find "$extract_dir" -type f -path '*/include/core/SkCanvas.h' -print -quit)
+          if [[ -z "$header" ]]; then
+            echo "::error::include/core/SkCanvas.h was not found in the Skia archive."
+            find "$extract_dir" -maxdepth 3 -type d | sed 's/^/  /'
+            exit 1
+          fi
+          skia_dir=$(cd "$(dirname "$header")/../.." && pwd)
+          echo "SKIA_DIR=$skia_dir"
+
+          # Prefer a Release output directory, but accept any layout produced by
+          # a custom Skia build.
+          lib_file=$(find "$skia_dir/out" -type f -path '*Release*' \
+            \( -name 'libskia.a' -o -name 'skia.lib' \) -print -quit 2>/dev/null || true)
+          if [[ -z "$lib_file" ]]; then
+            lib_file=$(find "$skia_dir" -type f \
+              \( -name 'libskia.a' -o -name 'skia.lib' \) -print -quit)
+          fi
+
+          if [[ -n "$lib_file" ]]; then
+            lib_dir=$(cd "$(dirname "$lib_file")" && pwd)
+          elif [[ -d "$skia_dir/out/Release-$SKIA_ARCH" ]]; then
+            lib_dir="$skia_dir/out/Release-$SKIA_ARCH"
+          else
+            echo "::error::No built Skia library (libskia.a / skia.lib) found under $skia_dir."
+            exit 1
+          fi
+          echo "SKIA_LIBRARY_DIR=$lib_dir"
+
+          {
+            echo "SKIA_DIR=$skia_dir"
+            echo "SKIA_LIBRARY_DIR=$lib_dir"
+          } >> "$GITHUB_ENV"
+
+      - uses: aseprite/get-ninja@main
+
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        if: runner.os == 'Windows'
+
+      - name: Generating Makefiles
+        shell: bash
+        working-directory: aseprite
+        env:
+          MACOS_ARCH: ${{ matrix.macos_arch }}
+        run: |
+          set -euo pipefail
+
+          # One cmake invocation for all systems. CMAKE_OSX_* is ignored by CMake
+          # on Windows/Linux, and MSYS converts POSIX paths in -D arguments for
+          # the native cmake.exe, so no per-OS path rewriting is needed.
+          target_version="10.9"
+          if [[ "$MACOS_ARCH" == "arm64" ]]; then
+            target_version="11.0"
+          fi
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_OSX_ARCHITECTURES="$MACOS_ARCH" \
+            -DCMAKE_OSX_SYSROOT=macosx \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$target_version" \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_I18N_STRINGS=ON \
+            -DENABLE_SCRIPTING=ON \
+            -DENABLE_CCACHE=OFF \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR="$SKIA_DIR" \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DSKIA_LIBRARY_DIR="$SKIA_LIBRARY_DIR"
+
+      - name: Compiling
+        shell: bash
+        working-directory: aseprite
+        run: |
+          cd build && ninja
+
+      - name: Clean Up Build folder
+        working-directory: aseprite/build/bin
+        shell: bash
+        run: find . -mindepth 1 ! \( -name 'aseprite' -o -name 'aseprite.exe' -o -name 'data' -prune -o -name 'Aseprite.app' -prune \) -exec rm -rf {} +
+
+      - name: Verify bundled translations
+        working-directory: aseprite/build/bin
+        shell: bash
+        run: |
+          data_dir=data
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            data_dir=Aseprite.app/Contents/Resources/data
+          fi
+          strings_dir="$data_dir/strings.git"
+
+          # Older Aseprite branches have no i18n strings; only enforce this when
+          # the checked out tree actually supports bundled translations.
+          if ! grep -qs 'ENABLE_I18N_STRINGS' "$GITHUB_WORKSPACE/aseprite/CMakeLists.txt"; then
+            echo "::warning::This Aseprite version has no ENABLE_I18N_STRINGS option; skipping translation check."
+            exit 0
+          fi
+
+          translation_found=false
+          for translation in "$strings_dir"/*.ini; do
+            if [[ "${translation##*/}" != en.ini && -f "$translation" ]] &&
+                grep -Eq '^[[:space:]]*\[[^]]+\]' "$translation"; then
+              translation_found=true
+              break
+            fi
+          done
+          if [[ "$translation_found" != true ]]; then
+            echo "No non-English translation content found in $strings_dir" >&2
+            exit 1
+          fi
+
+          # Keep translations and licensing files; omit only Git metadata.
+          rm -rf "$strings_dir/.git"
+
+      - name: Make portable zip
+        working-directory: aseprite/build/bin
+        run: echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+
+      - name: Create ZIP archive
+        if: runner.os != 'macOS'
+        working-directory: aseprite/build/bin
+        env:
+          ASSET_NAME: Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}.zip
+        run: 7z -tzip a "$ASSET_NAME" *
+
+      - name: Package and verify macOS archive
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        working-directory: aseprite/build/bin
+        shell: bash
+        env:
+          ASSET_NAME: Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}.zip
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/package-macos.sh" "$ASSET_NAME"
+
+      - name: Upload validation artifact
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}-${{ runner.arch }}-attempt${{ github.run_attempt }}
+          path: aseprite/build/bin/Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}.zip
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload release
+        if: ${{ inputs.publish }}
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: aseprite/build/bin/Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}.zip
+          asset_name: Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}.zip
+          tag: ${{ needs.prepare.outputs.release-tag }}
+          overwrite: true
