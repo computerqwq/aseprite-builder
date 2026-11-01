@@ -1,91 +1,95 @@
-name: Build and release Aseprite_xuanze
+name: 构建并发布 Aseprite（xuanze）
 
-# Manual trigger only (push / BuildLog.md trigger removed on purpose).
-# Every run explicitly picks the target systems, the Aseprite ref and the Skia archive.
+# 触发方式：仅手动触发（已移除 push / BuildLog.md 触发）。
+# 一次运行可以自己决定：编译哪些系统、编译哪份 Aseprite 源码、用哪份 Skia、是否发布。
+#
+# 注意区分两个容易混淆的输入：
+#   aseprite_version —— 决定「编译哪份源码」，填分支名 / 标签名 / 提交 SHA
+#   release_tag      —— 只决定「发布页面的标签名 + 压缩包文件名」，不影响编译内容
 on:
   workflow_dispatch:
     inputs:
-      publish:
-        description: 'Publish a GitHub Release (false = build only, upload artifacts)'
-        type: boolean
-        default: true
-      aseprite_ref:
-        description: 'Aseprite branch / tag / commit to build (empty = latest official release)'
-        type: string
-        default: ''
-      release_tag:
-        description: 'Release tag (empty = latest release tag, or the Aseprite ref)'
-        type: string
-        default: ''
       build_windows:
-        description: 'Build Windows x64'
+        description: '【系统】编译 Windows（x64）'
         type: boolean
         default: true
       build_linux:
-        description: 'Build Linux x64'
+        description: '【系统】编译 Linux（x64）'
         type: boolean
         default: true
       build_macos_arm64:
-        description: 'Build macOS Apple Silicon (arm64)'
+        description: '【系统】编译 macOS（Apple 芯片 / arm64）'
         type: boolean
         default: true
       build_macos_x86:
-        description: 'Build macOS Intel (x86_64)'
+        description: '【系统】编译 macOS（Intel 芯片 / x86_64）'
         type: boolean
         default: false
+      aseprite_version:
+        description: '【源码】要编译的 Aseprite 版本：分支名 / 标签名 / 提交 SHA；留空 = 官方最新正式版'
+        type: string
+        default: ''
       skia_repo:
-        description: 'Skia release repository (owner/repo)'
+        description: '【Skia】预编译包所在仓库（owner/repo，默认官方 aseprite/skia）'
         type: string
         default: 'aseprite/skia'
       skia_version:
-        description: 'Skia release tag, must match the Aseprite ref (e.g. m124-08a5439a6b)'
+        description: '【Skia】版本号（仓库的 Release 标签，例如 m124-08a5439a6b，需与 Aseprite 版本匹配）'
         type: string
         default: 'm124-08a5439a6b'
       skia_url_windows:
-        description: 'Custom Skia archive URL for Windows (empty = skia_repo/skia_version)'
+        description: '【Skia】自定义压缩包下载地址（Windows）；留空 = 用上面的仓库 + 版本自动拼'
         type: string
         default: ''
       skia_url_linux:
-        description: 'Custom Skia archive URL for Linux (empty = skia_repo/skia_version)'
+        description: '【Skia】自定义压缩包下载地址（Linux）；留空 = 用上面的仓库 + 版本自动拼'
         type: string
         default: ''
       skia_url_macos_arm64:
-        description: 'Custom Skia archive URL for macOS arm64 (empty = skia_repo/skia_version)'
+        description: '【Skia】自定义压缩包下载地址（macOS arm64）；留空 = 用上面的仓库 + 版本自动拼'
         type: string
         default: ''
       skia_url_macos_x86:
-        description: 'Custom Skia archive URL for macOS x86_64 (empty = skia_repo/skia_version)'
+        description: '【Skia】自定义压缩包下载地址（macOS x86_64）；留空 = 用上面的仓库 + 版本自动拼'
+        type: string
+        default: ''
+      publish:
+        description: '【发布】构建完是否发布到 GitHub Release；关闭 = 只构建并上传 Actions 产物'
+        type: boolean
+        default: true
+      release_tag:
+        description: '【发布】Release 标签名（同时作为压缩包文件名）；留空 = 自动生成，不改变编译的源码'
         type: string
         default: ''
 
-# Same single build type for all three systems.
+# 三个系统统一使用 Release 构建类型。
 env:
   BUILD_TYPE: Release
 
 jobs:
   prepare:
-    name: Prepare build plan
+    name: 准备构建计划
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
-      aseprite-ref: ${{ steps.plan.outputs.aseprite-ref }}
+      aseprite-version: ${{ steps.plan.outputs.aseprite-version }}
       release-tag: ${{ steps.plan.outputs.release-tag }}
     steps:
-      - name: Fetch latest Aseprite release tag
+      - name: 查询 Aseprite 最新正式版
         id: latest
-        if: ${{ inputs.aseprite_ref == '' }}
+        if: ${{ inputs.aseprite_version == '' }}
         uses: a1393323447/fetch-release@main
         with:
           group: aseprite
           repo: aseprite
           match: Aseprite-.*?-Source.zip
 
-      - name: Resolve build plan
+      - name: 生成构建计划
         id: plan
         env:
-          INPUT_REF: ${{ inputs.aseprite_ref }}
+          INPUT_VERSION: ${{ inputs.aseprite_version }}
           INPUT_TAG: ${{ inputs.release_tag }}
           LATEST_TAG: ${{ steps.latest.outputs.release-tag }}
           PUBLISH: ${{ inputs.publish }}
@@ -121,41 +125,41 @@ jobs:
 
 
           latest_tag = env("LATEST_TAG")
-          input_ref = env("INPUT_REF")
+          input_version = env("INPUT_VERSION")
           input_tag = env("INPUT_TAG")
 
-          aseprite_ref = input_ref or latest_tag
-          if not aseprite_ref:
-              fail("No Aseprite ref resolved: the release lookup returned nothing and aseprite_ref is empty.")
+          aseprite_version = input_version or latest_tag
+          if not aseprite_version:
+              fail("没有确定要编译的 Aseprite 源码版本：自动查询最新正式版失败，且 aseprite_version 为空。")
 
           if (
-              not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", aseprite_ref)
-              or ".." in aseprite_ref
-              or aseprite_ref.endswith("/")
-              or aseprite_ref.endswith(".lock")
+              not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", aseprite_version)
+              or ".." in aseprite_version
+              or aseprite_version.endswith("/")
+              or aseprite_version.endswith(".lock")
           ):
               fail(
-                  f"Invalid Aseprite ref '{aseprite_ref}'. "
-                  "Use a branch, tag or commit SHA made of [A-Za-z0-9._/-]."
+                  f"Aseprite 源码版本「{aseprite_version}」不合法："
+                  "只能用英文字母、数字和 . _ / - 组成的分支名、标签名或提交 SHA。"
               )
 
           if input_tag:
               if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", input_tag) or ".." in input_tag:
-                  fail(f"Invalid release_tag '{input_tag}'. Only [A-Za-z0-9._-] are allowed.")
+                  fail(f"Release 标签名「{input_tag}」不合法：只能用英文字母、数字和 . _ -（不能含空格或中文）。")
               release_tag = input_tag
-          elif input_ref:
-              # A branch such as feature/foo cannot be used verbatim as an asset name.
-              release_tag = re.sub(r"[^A-Za-z0-9._-]+", "-", input_ref).strip("-.") or "custom-build"
+          elif input_version:
+              # feature/foo 这类分支名不能直接当文件名，转成 feature-foo。
+              release_tag = re.sub(r"[^A-Za-z0-9._-]+", "-", input_version).strip("-.") or "custom-build"
           else:
-              release_tag = aseprite_ref
+              release_tag = aseprite_version
 
           skia_repo = env("SKIA_REPO") or "aseprite/skia"
           if not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", skia_repo):
-              fail(f"Invalid skia_repo '{skia_repo}'. Expected owner/repo.")
+              fail(f"Skia 仓库「{skia_repo}」不合法：格式必须是 owner/repo。")
 
           skia_version = env("SKIA_VERSION") or "m124-08a5439a6b"
           if not re.fullmatch(r"[A-Za-z0-9._-]+", skia_version):
-              fail(f"Invalid skia_version '{skia_version}'.")
+              fail(f"Skia 版本号「{skia_version}」不合法。")
 
           skia_base = f"https://github.com/{skia_repo}/releases/download/{skia_version}"
 
@@ -165,7 +169,7 @@ jobs:
               if not value:
                   return f"{skia_base}/{default_asset}"
               if not re.fullmatch(r"https?://[^\s]+", value):
-                  fail(f"Invalid {override_env} '{value}': it must be an http(s) URL.")
+                  fail(f"自定义 Skia 地址（{override_env}）「{value}」不合法：必须是 http(s) 地址。")
               return value
 
 
@@ -220,26 +224,26 @@ jobs:
               )
 
           if not targets:
-              fail("No build target selected: enable at least one of build_windows, build_linux, build_macos_arm64, build_macos_x86.")
+              fail("没有勾选任何编译系统：build_windows / build_linux / build_macos_arm64 / build_macos_x86 至少要开一个。")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(f"matrix={json.dumps(targets, separators=(',', ':'))}\n")
-              handle.write(f"aseprite-ref={aseprite_ref}\n")
+              handle.write(f"aseprite-version={aseprite_version}\n")
               handle.write(f"release-tag={release_tag}\n")
 
-          print("Aseprite ref:", aseprite_ref)
-          print("Release tag:", release_tag)
-          print("Targets:", ", ".join(target["label"] for target in targets))
+          print("要编译的源码版本：", aseprite_version)
+          print("Release 标签名：", release_tag)
+          print("编译系统：", "、".join(target["label"] for target in targets))
 
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if summary:
               with open(summary, "a", encoding="utf-8") as handle:
-                  handle.write("## Aseprite build plan\n\n")
-                  handle.write(f"- Aseprite ref: `{aseprite_ref}`\n")
-                  handle.write(f"- Release tag: `{release_tag}`\n")
-                  handle.write(f"- Publish release: `{flag('PUBLISH')}`\n")
-                  handle.write(f"- Skia source: `{skia_repo}` @ `{skia_version}`\n\n")
-                  handle.write("| Target | Runner | Skia archive |\n| --- | --- | --- |\n")
+                  handle.write("## Aseprite 构建计划\n\n")
+                  handle.write(f"- 要编译的源码版本：`{aseprite_version}`\n")
+                  handle.write(f"- Release 标签名：`{release_tag}`\n")
+                  handle.write(f"- 是否发布 Release：`{'是' if flag('PUBLISH') else '否（仅上传 Actions 产物）'}`\n")
+                  handle.write(f"- Skia 来源：`{skia_repo}` @ `{skia_version}`\n\n")
+                  handle.write("| 目标系统 | 运行环境 | Skia 压缩包 |\n| --- | --- | --- |\n")
                   for target in targets:
                       handle.write(
                           f"| {target['label']} | `{target['os']}` | {target['skia_url']} |\n"
@@ -247,7 +251,7 @@ jobs:
           PY
 
   create-release:
-    name: Create Release
+    name: 创建 Release
     needs: prepare
     if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
@@ -259,12 +263,12 @@ jobs:
           tag: ${{ needs.prepare.outputs.release-tag }}
           body: |
             Aseprite-${{ needs.prepare.outputs.release-tag }}
-            Built from `${{ needs.prepare.outputs.aseprite-ref }}`
+            源码版本：`${{ needs.prepare.outputs.aseprite-version }}`
           skipIfReleaseExists: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
   build-aseprite:
-    name: Build ${{ matrix.label }}
+    name: 编译 ${{ matrix.label }}
     needs: [prepare, create-release]
     if: >-
       ${{ !cancelled() && needs.prepare.result == 'success' &&
@@ -278,7 +282,7 @@ jobs:
         include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
       fail-fast: false
     steps:
-      - name: Install Dependencies
+      - name: 安装 Linux 依赖
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -288,12 +292,13 @@ jobs:
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
             libfontconfig1-dev
 
-      - uses: actions/checkout@v7
+      - name: 检出本仓库
+        uses: actions/checkout@v7
 
-      - name: Install Aseprite (${{ needs.prepare.outputs.aseprite-ref }})
+      - name: 拉取 Aseprite 源码（${{ needs.prepare.outputs.aseprite-version }}）
         shell: bash
         env:
-          ASEPRITE_REF: ${{ needs.prepare.outputs.aseprite-ref }}
+          ASEPRITE_VERSION: ${{ needs.prepare.outputs.aseprite-version }}
         run: |
           set -euo pipefail
           mkdir aseprite
@@ -301,18 +306,18 @@ jobs:
           git init -q .
           git remote add origin https://github.com/aseprite/aseprite.git
 
-          # Branches, tags and commit SHAs are all accepted here.
-          if git fetch --depth 1 origin "$ASEPRITE_REF"; then
+          # 分支名、标签名、提交 SHA 都支持。
+          if git fetch --depth 1 origin "$ASEPRITE_VERSION"; then
             git checkout -q --detach FETCH_HEAD
           else
-            echo "Shallow fetch failed, fetching all refs and history..."
+            echo "浅克隆失败，改为完整拉取所有分支和标签……"
             git fetch origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
-            if git rev-parse --verify -q "$ASEPRITE_REF^{commit}" >/dev/null; then
-              git checkout -q --detach "$ASEPRITE_REF"
-            elif git rev-parse --verify -q "origin/$ASEPRITE_REF^{commit}" >/dev/null; then
-              git checkout -q --detach "origin/$ASEPRITE_REF"
+            if git rev-parse --verify -q "$ASEPRITE_VERSION^{commit}" >/dev/null; then
+              git checkout -q --detach "$ASEPRITE_VERSION"
+            elif git rev-parse --verify -q "origin/$ASEPRITE_VERSION^{commit}" >/dev/null; then
+              git checkout -q --detach "origin/$ASEPRITE_VERSION"
             else
-              echo "::error::Cannot resolve Aseprite ref '$ASEPRITE_REF'."
+              echo "::error::找不到 Aseprite 源码版本「$ASEPRITE_VERSION」。"
               exit 1
             fi
           fi
@@ -320,7 +325,7 @@ jobs:
           git submodule sync --recursive
           git submodule update --init --recursive -j8
 
-      - name: Install Skia
+      - name: 下载并解压 Skia
         shell: bash
         env:
           SKIA_URL: ${{ matrix.skia_url }}
@@ -328,13 +333,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A mismatched runner would silently cross-compile against the wrong Skia.
+          # 运行环境架构和所选 Skia 架构不一致时，会悄悄交叉编译，这里直接报错。
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             actual_arch=$(uname -m)
             if [[ "$actual_arch" == "arm64" && "$SKIA_ARCH" != "arm64" ]] ||
                [[ "$actual_arch" == "x86_64" && "$SKIA_ARCH" != "x64" ]]; then
-              echo "::error::Runner architecture '$actual_arch' does not match the selected Skia target '$SKIA_ARCH'."
-              echo "::error::Pick the matching macOS target (build_macos_arm64 or build_macos_x86)."
+              echo "::error::运行环境架构是 $actual_arch，与所选的 Skia 架构 $SKIA_ARCH 不匹配。"
+              echo "::error::请勾选对应的 macOS 目标：build_macos_arm64 或 build_macos_x86。"
               exit 1
             fi
           fi
@@ -346,11 +351,10 @@ jobs:
           rm -rf "$download_dir" "$extract_dir"
           mkdir -p "$download_dir" "$extract_dir"
 
-          echo "Downloading Skia: $SKIA_URL"
+          echo "正在下载 Skia：$SKIA_URL"
           curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 -o "$archive" "$SKIA_URL"
 
-          # Users may supply their own Skia build, so accept every common archive
-          # type instead of trusting the URL (release assets often have none).
+          # 用户可能提供自己编译的 Skia，所以不靠 URL 后缀判断格式，逐个工具尝试。
           extract_skia() {
             if command -v unzip >/dev/null 2>&1 && unzip -tq "$archive" >/dev/null 2>&1; then
               unzip -q -o "$archive" -d "$extract_dir"
@@ -359,24 +363,24 @@ jobs:
             elif command -v 7z >/dev/null 2>&1 && 7z l "$archive" >/dev/null 2>&1; then
               7z x -y -o"$extract_dir" "$archive" >/dev/null
             else
-              echo "::error::Cannot extract the Skia archive from $SKIA_URL."
-              echo "::error::Supported formats: .zip, .tar.gz, .tar.xz, .tar.bz2, .tar.zst, .7z."
+              echo "::error::无法解压 Skia：$SKIA_URL"
+              echo "::error::支持 zip、tar.gz、tar.xz、tar.bz2、tar.zst、7z。"
               exit 1
             fi
           }
           extract_skia
 
+          # 自动定位 Skia 根目录：包含 include/core/SkCanvas.h 的那一层。
           header=$(find "$extract_dir" -type f -path '*/include/core/SkCanvas.h' -print -quit)
           if [[ -z "$header" ]]; then
-            echo "::error::include/core/SkCanvas.h was not found in the Skia archive."
+            echo "::error::Skia 压缩包里找不到 include/core/SkCanvas.h。"
             find "$extract_dir" -maxdepth 3 -type d | sed 's/^/  /'
             exit 1
           fi
           skia_dir=$(cd "$(dirname "$header")/../.." && pwd)
           echo "SKIA_DIR=$skia_dir"
 
-          # Prefer a Release output directory, but accept any layout produced by
-          # a custom Skia build.
+          # 优先用带 Release 的输出目录，也兼容自编译 Skia 的其它目录结构。
           lib_file=$(find "$skia_dir/out" -type f -path '*Release*' \
             \( -name 'libskia.a' -o -name 'skia.lib' \) -print -quit 2>/dev/null || true)
           if [[ -z "$lib_file" ]]; then
@@ -389,7 +393,7 @@ jobs:
           elif [[ -d "$skia_dir/out/Release-$SKIA_ARCH" ]]; then
             lib_dir="$skia_dir/out/Release-$SKIA_ARCH"
           else
-            echo "::error::No built Skia library (libskia.a / skia.lib) found under $skia_dir."
+            echo "::error::在 $skia_dir 下找不到已编译的 Skia 库（libskia.a / skia.lib）。"
             exit 1
           fi
           echo "SKIA_LIBRARY_DIR=$lib_dir"
@@ -399,12 +403,14 @@ jobs:
             echo "SKIA_LIBRARY_DIR=$lib_dir"
           } >> "$GITHUB_ENV"
 
-      - uses: aseprite/get-ninja@main
+      - name: 安装 Ninja
+        uses: aseprite/get-ninja@main
 
-      - uses: ilammy/msvc-dev-cmd@v1.13.0
+      - name: 配置 MSVC 环境
         if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1.13.0
 
-      - name: Generating Makefiles
+      - name: 配置 CMake
         shell: bash
         working-directory: aseprite
         env:
@@ -412,9 +418,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # One cmake invocation for all systems. CMAKE_OSX_* is ignored by CMake
-          # on Windows/Linux, and MSYS converts POSIX paths in -D arguments for
-          # the native cmake.exe, so no per-OS path rewriting is needed.
+          # 三个系统共用同一条 cmake 命令：CMAKE_OSX_* 在 Windows/Linux 上会被
+          # CMake 忽略；MSYS 会自动把 -D 参数里的 POSIX 路径转成原生路径，
+          # 所以不需要按系统写不同分支。
           target_version="10.9"
           if [[ "$MACOS_ARCH" == "arm64" ]]; then
             target_version="11.0"
@@ -434,18 +440,18 @@ jobs:
             -DOPENSSL_USE_STATIC_LIBS=ON \
             -DSKIA_LIBRARY_DIR="$SKIA_LIBRARY_DIR"
 
-      - name: Compiling
+      - name: 编译
         shell: bash
         working-directory: aseprite
         run: |
           cd build && ninja
 
-      - name: Clean Up Build folder
+      - name: 清理构建目录
         working-directory: aseprite/build/bin
         shell: bash
         run: find . -mindepth 1 ! \( -name 'aseprite' -o -name 'aseprite.exe' -o -name 'data' -prune -o -name 'Aseprite.app' -prune \) -exec rm -rf {} +
 
-      - name: Verify bundled translations
+      - name: 校验内置翻译
         working-directory: aseprite/build/bin
         shell: bash
         run: |
@@ -455,10 +461,9 @@ jobs:
           fi
           strings_dir="$data_dir/strings.git"
 
-          # Older Aseprite branches have no i18n strings; only enforce this when
-          # the checked out tree actually supports bundled translations.
+          # 老版本 Aseprite 没有翻译目录，只有源码树支持 ENABLE_I18N_STRINGS 时才强制校验。
           if ! grep -qs 'ENABLE_I18N_STRINGS' "$GITHUB_WORKSPACE/aseprite/CMakeLists.txt"; then
-            echo "::warning::This Aseprite version has no ENABLE_I18N_STRINGS option; skipping translation check."
+            echo "::warning::该 Aseprite 版本没有 ENABLE_I18N_STRINGS 选项，跳过翻译校验。"
             exit 0
           fi
 
@@ -471,25 +476,25 @@ jobs:
             fi
           done
           if [[ "$translation_found" != true ]]; then
-            echo "No non-English translation content found in $strings_dir" >&2
+            echo "在 $strings_dir 里没有找到非英文翻译内容" >&2
             exit 1
           fi
 
-          # Keep translations and licensing files; omit only Git metadata.
+          # 保留翻译和许可文件，只去掉 Git 元数据。
           rm -rf "$strings_dir/.git"
 
-      - name: Make portable zip
+      - name: 写入便携模式配置
         working-directory: aseprite/build/bin
-        run: echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+        run: echo '# This file makes Aseprite run in portable mode' > aseprite.ini
 
-      - name: Create ZIP archive
+      - name: 打包 ZIP
         if: runner.os != 'macOS'
         working-directory: aseprite/build/bin
         env:
           ASSET_NAME: Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}.zip
         run: 7z -tzip a "$ASSET_NAME" *
 
-      - name: Package and verify macOS archive
+      - name: 打包并校验 macOS 压缩包
         if: runner.os == 'macOS'
         timeout-minutes: 10
         working-directory: aseprite/build/bin
@@ -498,7 +503,7 @@ jobs:
           ASSET_NAME: Aseprite-${{ needs.prepare.outputs.release-tag }}-${{ matrix.asset_os }}.zip
         run: bash "$GITHUB_WORKSPACE/.github/scripts/package-macos.sh" "$ASSET_NAME"
 
-      - name: Upload validation artifact
+      - name: 上传 Actions 产物
         if: ${{ !inputs.publish }}
         uses: actions/upload-artifact@v7
         with:
@@ -507,7 +512,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
-      - name: Upload release
+      - name: 上传到 Release
         if: ${{ inputs.publish }}
         uses: svenstaro/upload-release-action@v2
         with:
