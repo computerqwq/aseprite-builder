@@ -1,7 +1,8 @@
 name: 构建并发布 Aseprite（xuanze）
 
 # 触发方式：仅手动触发（已移除 push / BuildLog.md 触发）。
-# 一次运行可以自己决定：编译哪些系统、编译哪份 Aseprite 源码、用哪份 Skia、是否发布。
+# 一次运行可以自己决定：编译哪些系统、编译哪份 Aseprite 源码、用哪份 Skia、
+# 用哪个 CMake、是否发布。
 #
 # 注意区分两个容易混淆的输入：
 #   aseprite_version —— 决定「编译哪份源码」，填分支名 / 标签名 / 提交 SHA
@@ -53,6 +54,14 @@ on:
         description: '【Skia】自定义压缩包下载地址（macOS x86_64）；留空 = 用上面的仓库 + 版本自动拼'
         type: string
         default: ''
+      cmake_version:
+        description: '【工具链】指定 CMake 版本（例如 3.31.12，支持 ~3.31.0 这类范围）；留空 = 用运行环境自带'
+        type: string
+        default: ''
+      cmake_policy_compat:
+        description: '【兼容】用最新 CMake 编旧代码时打开：兼容旧策略（等价于 -DCMAKE_POLICY_VERSION_MINIMUM=3.5，仅 CMake 4+ 生效）'
+        type: boolean
+        default: false
       publish:
         description: '【发布】构建完是否发布到 GitHub Release；关闭 = 只构建并上传 Actions 产物'
         type: boolean
@@ -403,6 +412,61 @@ jobs:
             echo "SKIA_LIBRARY_DIR=$lib_dir"
           } >> "$GITHUB_ENV"
 
+      - name: 安装指定 CMake
+        if: ${{ inputs.cmake_version != '' }}
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: ${{ inputs.cmake_version }}
+
+      - name: 校验指定 CMake 版本
+        if: ${{ inputs.cmake_version != '' }}
+        shell: bash
+        env:
+          REQUESTED_CMAKE: ${{ inputs.cmake_version }}
+        run: |
+          set -euo pipefail
+          actual=$(cmake --version | head -n 1)
+          echo "当前 CMake：$actual"
+          # 精确版本才比对；~3.31.0 / ^3.31 / latest 这类写法只打印实际结果。
+          if [[ "$REQUESTED_CMAKE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ "$actual" != *"$REQUESTED_CMAKE"* ]]; then
+              echo "::error::请求安装 CMake $REQUESTED_CMAKE，实际却是「$actual」。"
+              exit 1
+            fi
+          else
+            echo "请求的是版本范围（$REQUESTED_CMAKE），跳过精确比对。"
+          fi
+
+      - name: 显示 CMake 版本
+        shell: bash
+        env:
+          POLICY_COMPAT: ${{ inputs.cmake_policy_compat }}
+        run: |
+          set -euo pipefail
+          version_line=$(cmake --version | head -n 1)
+          major=$(printf '%s\n' "$version_line" | sed -n 's/^cmake version \([0-9][0-9]*\)\..*/\1/p')
+          major=${major:-0}
+
+          compat_effective=false
+          if [[ "$POLICY_COMPAT" == "true" && "$major" -ge 4 ]]; then
+            compat_effective=true
+          fi
+
+          echo "实际使用：$version_line"
+          echo "旧策略兼容开关：$compat_effective"
+
+          {
+            echo "CMAKE_ACTUAL=$version_line"
+            echo "CMAKE_COMPAT_EFFECTIVE=$compat_effective"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "### 工具链"
+            echo ""
+            echo "- CMake：$version_line"
+            echo "- 旧策略兼容（-DCMAKE_POLICY_VERSION_MINIMUM=3.5）：$compat_effective"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: 安装 Ninja
         uses: aseprite/get-ninja@main
 
@@ -426,8 +490,17 @@ jobs:
             target_version="11.0"
           fi
 
+          # CMake 4 删除了对 cmake_minimum_required(<3.5) 的兼容，旧版 Aseprite
+          # 的第三方子项目因此会配置失败；【兼容】开关打开时补上官方逃生口。
+          policy_flag=""
+          if [[ "${CMAKE_COMPAT_EFFECTIVE:-false}" == "true" ]]; then
+            policy_flag="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+            echo "已启用旧策略兼容：$policy_flag"
+          fi
+
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            $policy_flag \
             -DCMAKE_OSX_ARCHITECTURES="$MACOS_ARCH" \
             -DCMAKE_OSX_SYSROOT=macosx \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="$target_version" \
